@@ -10,9 +10,11 @@ import (
 )
 
 const (
-	TypeStart = "0"
-	TypeEnd   = "1"
-	LogFile   = "pomo_log.csv"
+	TypeStart  = "0"
+	TypeEnd    = "1"
+	TypePause  = "2"
+	TypeResume = "3"
+	LogFile    = "pomo_log.csv"
 )
 
 type Entry struct {
@@ -24,7 +26,7 @@ type Entry struct {
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: pomo <command> [args]")
-		fmt.Println("Commands: start <task name>, stop, now, stats")
+		fmt.Println("Commands: start <task name>, stop, pause, resume, now, stats")
 		os.Exit(1)
 	}
 
@@ -40,13 +42,17 @@ func main() {
 		startTask(taskName)
 	case "stop":
 		stopTask()
+	case "pause":
+		pauseTask()
+	case "resume":
+		resumeTask()
 	case "now":
 		showCurrentTask()
 	case "stats":
 		showStats()
 	default:
 		fmt.Printf("Unknown command: %s\n", command)
-		fmt.Println("Commands: start <task name>, stop, now, stats")
+		fmt.Println("Commands: start <task name>, stop, pause, resume, now, stats")
 		os.Exit(1)
 	}
 }
@@ -136,8 +142,13 @@ func startTask(taskName string) {
 		os.Exit(1)
 	}
 
-	if lastEntry != nil && lastEntry.Type == TypeStart {
+	if lastEntry != nil && (lastEntry.Type == TypeStart || lastEntry.Type == TypeResume) {
 		fmt.Printf("Task '%s' is already running. Stop it first.\n", lastEntry.TaskName)
+		os.Exit(1)
+	}
+
+	if lastEntry != nil && lastEntry.Type == TypePause {
+		fmt.Printf("Task '%s' is paused. Resume it first or stop it to start a new task.\n", lastEntry.TaskName)
 		os.Exit(1)
 	}
 
@@ -153,6 +164,73 @@ func startTask(taskName string) {
 	}
 
 	fmt.Printf("Started tracking '%s'\n", taskName)
+}
+
+func pauseTask() {
+	lastEntry, err := getLastEntry()
+	if err != nil {
+		fmt.Printf("Error reading log: %v\n", err)
+		os.Exit(1)
+	}
+
+	if lastEntry == nil {
+		fmt.Println("No task is currently running")
+		os.Exit(1)
+	}
+
+	if lastEntry.Type == TypeEnd {
+		fmt.Println("No task is currently running")
+		os.Exit(1)
+	}
+
+	if lastEntry.Type == TypePause {
+		fmt.Printf("Task '%s' is already paused\n", lastEntry.TaskName)
+		os.Exit(1)
+	}
+
+	entry := Entry{
+		Timestamp: time.Now(),
+		TaskName:  lastEntry.TaskName,
+		Type:      TypePause,
+	}
+
+	if err := writeEntry(entry); err != nil {
+		fmt.Printf("Error writing to log: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Paused task '%s'\n", lastEntry.TaskName)
+}
+
+func resumeTask() {
+	lastEntry, err := getLastEntry()
+	if err != nil {
+		fmt.Printf("Error reading log: %v\n", err)
+		os.Exit(1)
+	}
+
+	if lastEntry == nil {
+		fmt.Println("No task is paused")
+		os.Exit(1)
+	}
+
+	if lastEntry.Type != TypePause {
+		fmt.Println("No task is paused")
+		os.Exit(1)
+	}
+
+	entry := Entry{
+		Timestamp: time.Now(),
+		TaskName:  lastEntry.TaskName,
+		Type:      TypeResume,
+	}
+
+	if err := writeEntry(entry); err != nil {
+		fmt.Printf("Error writing to log: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Resumed task '%s'\n", lastEntry.TaskName)
 }
 
 func stopTask() {
@@ -194,8 +272,17 @@ func showCurrentTask() {
 		return
 	}
 
+	if lastEntry.Type == TypePause {
+		fmt.Printf("Current task: '%s' (paused)\n", lastEntry.TaskName)
+		return
+	}
+
 	duration := time.Since(lastEntry.Timestamp)
-	fmt.Printf("Current task: '%s' (running for %s)\n", lastEntry.TaskName, formatDuration(duration))
+	status := "running"
+	if lastEntry.Type == TypeResume {
+		status = "resumed"
+	}
+	fmt.Printf("Current task: '%s' (%s for %s)\n", lastEntry.TaskName, status, formatDuration(duration))
 }
 
 func showStats() {
@@ -221,30 +308,39 @@ func showStats() {
 	var todayTasks int
 
 	for i := 0; i < len(entries); i++ {
-		if entries[i].Type == TypeStart {
-			// Find corresponding end
-			var endTime time.Time
+		if entries[i].Type == TypeStart || entries[i].Type == TypeResume {
+			// Find corresponding pause or end
+			var segmentDuration time.Duration
 			found := false
+
 			for j := i + 1; j < len(entries); j++ {
-				if entries[j].Type == TypeEnd && entries[j].TaskName == entries[i].TaskName {
-					endTime = entries[j].Timestamp
-					found = true
-					break
+				if entries[j].TaskName == entries[i].TaskName {
+					if entries[j].Type == TypePause || entries[j].Type == TypeEnd {
+						segmentDuration = entries[j].Timestamp.Sub(entries[i].Timestamp)
+						found = true
+
+						// If this is an end, mark task as completed
+						if entries[j].Type == TypeEnd {
+							completedTasks++
+							date := entries[i].Timestamp.Format("2006-01-02")
+							dailyTasks[date]++
+
+							if date == today {
+								todayTasks++
+							}
+						}
+						break
+					}
 				}
 			}
 
 			if found {
-				duration := endTime.Sub(entries[i].Timestamp)
-				taskDurations[entries[i].TaskName] += duration
-				totalDuration += duration
-				completedTasks++
+				taskDurations[entries[i].TaskName] += segmentDuration
+				totalDuration += segmentDuration
 
 				date := entries[i].Timestamp.Format("2006-01-02")
-				dailyTasks[date]++
-
 				if date == today {
-					todayDuration += duration
-					todayTasks++
+					todayDuration += segmentDuration
 				}
 			}
 		}
